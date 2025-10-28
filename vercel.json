@@ -1,5 +1,5 @@
 {
-  "buildCommand": "pnpm build --filter=webapp",
+  "buildCommand": "pnpm build",
   "installCommand": "pnpm install",
   "framework": "nextjs",
   "outputDirectory": "apps/webapp/.next"
