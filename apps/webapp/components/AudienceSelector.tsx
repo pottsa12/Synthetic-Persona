@@ -23,16 +23,24 @@ export default function AudienceSelector({
   const [audiences, setAudiences] = useState<Audience[]>([]);
   const [selectedId, setSelectedId] = useState<string>("");
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     const fetchAudiences = async () => {
       setLoading(true);
-      const { data, error } = await supabase.from("audiences").select("*");
+      setError(null);
 
-      if (error) {
-        console.error("Error fetching audiences:", error);
+      const { data, error: fetchError } = await supabase
+        .from("audiences")
+        .select("*")
+        .order("audience_name", { ascending: true });
+
+      if (fetchError) {
+        console.error("Error fetching audiences:", fetchError);
+        setError("Failed to load audiences. Please refresh the page.");
       } else if (data) {
         setAudiences(data);
+        console.log(`Loaded ${data.length} audiences from Supabase`);
       }
       setLoading(false);
     };
@@ -53,6 +61,22 @@ export default function AudienceSelector({
     return (
       <div className="text-sm text-muted-foreground">
         Loading audiences...
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="text-sm text-destructive">
+        {error}
+      </div>
+    );
+  }
+
+  if (audiences.length === 0) {
+    return (
+      <div className="text-sm text-muted-foreground">
+        No audiences available. Please check your Supabase connection.
       </div>
     );
   }
