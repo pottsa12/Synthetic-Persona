@@ -7,7 +7,9 @@ Supports text, images, and video inputs for rich brand feedback.
 
 import os
 import base64
+import asyncio
 from typing import Optional
+from concurrent.futures import ThreadPoolExecutor
 from fastapi import FastAPI, File, Form, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -50,13 +52,21 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# Configure CORS
+# Configure CORS for Vercel deployment
+# Allow Vercel production and preview deployments
+ALLOWED_ORIGINS = os.environ.get(
+    "ALLOWED_ORIGINS",
+    "http://localhost:3000"
+).split(",")
+
+# Add wildcard support for Vercel preview deployments
+# In production, set ALLOWED_ORIGINS env var to include your Vercel domains
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Configure this properly in production
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["POST", "GET", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization"],
 )
 
 # --- Vertex AI Initialization ---
@@ -71,6 +81,14 @@ if PROJECT_ID:
 else:
     print("WARNING: GCLOUD_PROJECT not set. API calls will fail.")
     model = None
+
+# Thread pool for blocking operations (Gemini API calls)
+# This prevents blocking the async event loop
+executor = ThreadPoolExecutor(max_workers=10)
+
+# File size limits (in bytes)
+MAX_IMAGE_SIZE = 10 * 1024 * 1024  # 10MB
+MAX_VIDEO_SIZE = 50 * 1024 * 1024  # 50MB
 
 
 def construct_prompt(user_prompt: str, brand_context: str, audience_summary: str) -> str:
@@ -164,8 +182,12 @@ async def chat_handler(request: ChatRequest):
             request.audience_summary
         )
 
-        # Generate content
-        response = model.generate_content([prompt])
+        # Run blocking Gemini API call in thread pool to avoid blocking event loop
+        loop = asyncio.get_event_loop()
+        response = await loop.run_in_executor(
+            executor,
+            lambda: model.generate_content([prompt])
+        )
 
         return ChatResponse(agent_response=response.text)
 
@@ -215,7 +237,14 @@ async def multimodal_chat_handler(
 
         # Add image if provided
         if image:
+            # Validate image size
             image_data = await image.read()
+            if len(image_data) > MAX_IMAGE_SIZE:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"Image file too large. Maximum size is {MAX_IMAGE_SIZE // (1024 * 1024)}MB."
+                )
+
             image_part = Part.from_data(
                 data=image_data,
                 mime_type=image.content_type or "image/jpeg"
@@ -224,15 +253,26 @@ async def multimodal_chat_handler(
 
         # Add video if provided
         if video:
+            # Validate video size
             video_data = await video.read()
+            if len(video_data) > MAX_VIDEO_SIZE:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"Video file too large. Maximum size is {MAX_VIDEO_SIZE // (1024 * 1024)}MB."
+                )
+
             video_part = Part.from_data(
                 data=video_data,
                 mime_type=video.content_type or "video/mp4"
             )
             content_parts.append(video_part)
 
-        # Generate content with multimodal input
-        response = model.generate_content(content_parts)
+        # Run blocking Gemini API call in thread pool to avoid blocking event loop
+        loop = asyncio.get_event_loop()
+        response = await loop.run_in_executor(
+            executor,
+            lambda: model.generate_content(content_parts)
+        )
 
         return ChatResponse(agent_response=response.text)
 

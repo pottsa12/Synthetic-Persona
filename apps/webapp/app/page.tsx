@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect } from "react";
 import AudienceSelector from "../components/AudienceSelector";
 import { Database } from "../lib/database.types";
 import { Button } from "../components/ui/button";
@@ -36,24 +36,47 @@ export default function Home() {
   const handleImageSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
+      // Validate file size (10MB limit)
+      const maxSize = 10 * 1024 * 1024; // 10MB
+      if (file.size > maxSize) {
+        alert("Image file is too large. Maximum size is 10MB.");
+        return;
+      }
+
       setSelectedImage(file);
-      const reader = new FileReader();
-      reader.onload = () => setImagePreview(reader.result as string);
-      reader.readAsDataURL(file);
+      // Use createObjectURL instead of FileReader to avoid memory issues
+      // Blob URLs are much more memory-efficient than data URLs
+      const blobUrl = URL.createObjectURL(file);
+      setImagePreview(blobUrl);
     }
   };
 
   const handleVideoSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
+      // Validate file size (50MB limit)
+      const maxSize = 50 * 1024 * 1024; // 50MB
+      if (file.size > maxSize) {
+        alert("Video file is too large. Maximum size is 50MB.");
+        return;
+      }
+
       setSelectedVideo(file);
-      const reader = new FileReader();
-      reader.onload = () => setVideoPreview(reader.result as string);
-      reader.readAsDataURL(file);
+      // Use createObjectURL instead of FileReader to avoid memory issues
+      const blobUrl = URL.createObjectURL(file);
+      setVideoPreview(blobUrl);
     }
   };
 
   const clearAttachments = () => {
+    // Revoke blob URLs to free memory
+    if (imagePreview?.startsWith('blob:')) {
+      URL.revokeObjectURL(imagePreview);
+    }
+    if (videoPreview?.startsWith('blob:')) {
+      URL.revokeObjectURL(videoPreview);
+    }
+
     setSelectedImage(null);
     setSelectedVideo(null);
     setImagePreview(null);
@@ -61,6 +84,18 @@ export default function Home() {
     if (imageInputRef.current) imageInputRef.current.value = "";
     if (videoInputRef.current) videoInputRef.current.value = "";
   };
+
+  // Cleanup blob URLs on component unmount to prevent memory leaks
+  useEffect(() => {
+    return () => {
+      if (imagePreview?.startsWith('blob:')) {
+        URL.revokeObjectURL(imagePreview);
+      }
+      if (videoPreview?.startsWith('blob:')) {
+        URL.revokeObjectURL(videoPreview);
+      }
+    };
+  }, [imagePreview, videoPreview]);
 
   const handleSendMessage = async () => {
     if (!currentMessage.trim() || !selectedAudience) {
@@ -91,7 +126,14 @@ export default function Home() {
       if (selectedImage) formData.append("image", selectedImage);
       if (selectedVideo) formData.append("video", selectedVideo);
 
-      const response = await fetch("/api/chat", {
+      // Use hybrid approach: direct upload for files, API route for text-only
+      // This avoids Vercel serverless function size limits for large file uploads
+      const hasFiles = selectedImage || selectedVideo;
+      const endpoint = hasFiles
+        ? `${process.env.NEXT_PUBLIC_AI_AGENT_URL}/chat/multimodal`
+        : "/api/chat";
+
+      const response = await fetch(endpoint, {
         method: "POST",
         body: formData,
       });
