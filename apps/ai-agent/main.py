@@ -7,12 +7,15 @@ Supports text, images, and video inputs for rich brand feedback.
 
 import os
 import base64
+import uuid
+from datetime import timedelta
 from typing import Optional, List
 from fastapi import FastAPI, File, Form, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import vertexai
 from vertexai.generative_models import GenerativeModel, Part
+from google.cloud import storage
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -196,6 +199,84 @@ def health_check():
     }
 
 
+class SignedUrlRequest(BaseModel):
+    """
+    Request model for generating signed upload URLs.
+
+    Args:
+        filename: Original filename of the video to upload
+        content_type: MIME type of the video (e.g., 'video/mp4')
+    """
+    filename: str
+    content_type: str
+
+
+class SignedUrlResponse(BaseModel):
+    """
+    Response model containing signed URL and GCS URI.
+
+    Args:
+        upload_url: Signed URL for uploading the video
+        gcs_uri: GCS URI to use when referencing the uploaded file
+        blob_name: Name of the blob in GCS
+    """
+    upload_url: str
+    gcs_uri: str
+    blob_name: str
+
+
+@app.post("/generate-upload-url", response_model=SignedUrlResponse)
+async def generate_upload_url(request: SignedUrlRequest):
+    """
+    Generates a signed URL for uploading large videos directly to GCS.
+
+    This endpoint creates a unique blob name and generates a signed URL
+    that allows the frontend to upload files directly to Google Cloud Storage.
+    The signed URL is valid for 15 minutes.
+
+    Args:
+        request: SignedUrlRequest with filename and content type
+
+    Returns:
+        SignedUrlResponse with upload URL, GCS URI, and blob name
+
+    Raises:
+        HTTPException: If URL generation fails
+    """
+    try:
+        # Initialize GCS client
+        storage_client = storage.Client(project=PROJECT_ID)
+        bucket = storage_client.bucket("synthetic-personas-videos")
+
+        # Generate unique blob name using UUID
+        file_extension = request.filename.split('.')[-1] if '.' in request.filename else 'mp4'
+        blob_name = f"{uuid.uuid4()}.{file_extension}"
+        blob = bucket.blob(blob_name)
+
+        # Generate signed URL (valid for 15 minutes)
+        upload_url = blob.generate_signed_url(
+            version="v4",
+            expiration=timedelta(minutes=15),
+            method="PUT",
+            content_type=request.content_type
+        )
+
+        # Construct GCS URI for Gemini
+        gcs_uri = f"gs://synthetic-personas-videos/{blob_name}"
+
+        return SignedUrlResponse(
+            upload_url=upload_url,
+            gcs_uri=gcs_uri,
+            blob_name=blob_name
+        )
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to generate upload URL: {str(e)}"
+        )
+
+
 @app.post("/chat", response_model=ChatResponse)
 async def chat_handler(request: ChatRequest):
     """
@@ -294,13 +375,16 @@ async def multimodal_chat_handler(
     audience_summary: str = Form(...),
     history: Optional[str] = Form(None),  # JSON string of chat history
     image: Optional[UploadFile] = File(None),
-    video: Optional[UploadFile] = File(None)
+    video: Optional[UploadFile] = File(None),
+    video_uri: Optional[str] = Form(None)  # GCS URI for large videos
 ):
     """
     Handles multimodal chat requests with text, images, and/or videos.
 
     This endpoint supports the full multimodal capabilities of Gemini,
     allowing users to upload visual content alongside their text prompts.
+    For videos larger than 30MB, use the video_uri parameter with a GCS URI
+    obtained from /generate-upload-url endpoint.
 
     Args:
         user_prompt: The user's question or statement
@@ -308,7 +392,8 @@ async def multimodal_chat_handler(
         audience_summary: Description of the persona
         history: Optional JSON string of conversation history
         image: Optional image file
-        video: Optional video file
+        video: Optional video file (for videos < 30MB)
+        video_uri: Optional GCS URI for large videos (for videos >= 30MB)
 
     Returns:
         ChatResponse with the agent's persona-based reply
@@ -355,8 +440,16 @@ async def multimodal_chat_handler(
             )
             content_parts.append(image_part)
 
-        # Add video if provided
-        if video:
+        # Add video if provided (either as file upload or GCS URI)
+        if video_uri:
+            # Use GCS URI for large videos (>30MB)
+            video_part = Part.from_uri(
+                uri=video_uri,
+                mime_type="video/mp4"  # Default to mp4, adjust if needed
+            )
+            content_parts.append(video_part)
+        elif video:
+            # Use direct upload for smaller videos (<30MB)
             video_data = await video.read()
             video_part = Part.from_data(
                 data=video_data,
