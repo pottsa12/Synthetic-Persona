@@ -7,7 +7,7 @@ Supports text, images, and video inputs for rich brand feedback.
 
 import os
 import base64
-from typing import Optional
+from typing import Optional, List
 from fastapi import FastAPI, File, Form, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -19,18 +19,34 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # --- Pydantic Models for API ---
+class ChatMessage(BaseModel):
+    """
+    Model for a single chat message in conversation history.
+
+    Args:
+        sender: Either 'user' or 'agent'
+        text: The message content
+    """
+    sender: str
+    text: str
+
+
 class ChatRequest(BaseModel):
     """
-    Chat request model for text-only interactions.
+    Chat request model for text-only interactions with optional history and image.
 
     Args:
         user_prompt: The user's question or statement
         brand_context: Context about the brand being discussed
         audience_summary: Description of the persona to embody
+        history: Optional list of previous chat messages for session memory
+        image_data: Optional Base64-encoded image data for multimodal analysis
     """
     user_prompt: str
     brand_context: str
     audience_summary: str
+    history: Optional[List[ChatMessage]] = None
+    image_data: Optional[str] = None
 
 
 class ChatResponse(BaseModel):
@@ -66,8 +82,8 @@ LOCATION = os.environ.get("GCLOUD_LOCATION", "us-central1")
 # Initialize Vertex AI
 if PROJECT_ID:
     vertexai.init(project=PROJECT_ID, location=LOCATION)
-    # Use Gemini 1.5 Pro for multimodal capabilities
-    model = GenerativeModel("gemini-1.5-pro")
+    # Use Gemini 2.5 Pro for multimodal capabilities (latest model)
+    model = GenerativeModel("gemini-2.5-pro")
 else:
     print("WARNING: GCLOUD_PROJECT not set. API calls will fail.")
     model = None
@@ -75,7 +91,7 @@ else:
 
 def construct_prompt(user_prompt: str, brand_context: str, audience_summary: str) -> str:
     """
-    Constructs the system prompt for the Gemini model.
+    Constructs the system prompt for the Gemini model (legacy function for backward compatibility).
 
     Args:
         user_prompt: User's question
@@ -110,6 +126,50 @@ Now, please respond to the following question or statement from the user, keepin
     )
 
 
+def construct_prompt_with_history(
+    user_prompt: str,
+    brand_context: str,
+    audience_summary: str,
+    history: Optional[List[ChatMessage]] = None
+) -> str:
+    """
+    Constructs a prompt with conversation history for session memory.
+
+    Args:
+        user_prompt: User's current question
+        brand_context: Brand information
+        audience_summary: Persona description
+        history: Optional list of previous chat messages
+
+    Returns:
+        Formatted prompt string with conversation history
+    """
+    # Start with the system instructions
+    full_prompt = f"""You are a creative testing and surveying chatbot acting as a specific consumer persona.
+Your persona is defined by: {audience_summary}
+
+You are being asked for feedback on a brand. The brand context is: {brand_context}
+
+Keep your persona and the brand context in mind at all times. Be authentic, detailed, and stay in character.
+
+--- Begin Conversation History ---
+"""
+
+    # Add conversation history if provided
+    if history:
+        for message in history:
+            if message.sender == 'user':
+                full_prompt += f"User: {message.text}\n"
+            else:
+                full_prompt += f"Agent: {message.text}\n"
+
+    # Add the current user message
+    full_prompt += f"User: {user_prompt}\n"
+    full_prompt += "Agent: "  # Prompt the agent to respond
+
+    return full_prompt
+
+
 @app.get("/")
 def read_root():
     """Health check endpoint."""
@@ -139,10 +199,11 @@ def health_check():
 @app.post("/chat", response_model=ChatResponse)
 async def chat_handler(request: ChatRequest):
     """
-    Handles text-only chat requests.
+    Handles chat requests with optional session memory and multimodal image support.
 
     Args:
-        request: ChatRequest with user prompt, brand context, and audience summary
+        request: ChatRequest with user prompt, brand context, audience summary,
+                optional conversation history, and optional image data
 
     Returns:
         ChatResponse with the agent's persona-based reply
@@ -157,20 +218,73 @@ async def chat_handler(request: ChatRequest):
         )
 
     try:
-        # Construct the prompt
-        prompt = construct_prompt(
+        # Construct the text prompt with conversation history
+        text_prompt = construct_prompt_with_history(
             request.user_prompt,
             request.brand_context,
-            request.audience_summary
+            request.audience_summary,
+            request.history
         )
 
-        # Generate content
-        response = model.generate_content([prompt])
+        # Start with the text prompt
+        prompt_parts = [text_prompt]
+
+        # Add image if provided (Base64 encoded)
+        if request.image_data:
+            try:
+                # The Base64 string is prefixed with "data:image/[type];base64,"
+                # We need to strip that prefix before decoding
+                if "," in request.image_data:
+                    header, base64_data = request.image_data.split(",", 1)
+                    # Extract mime type from header (e.g., "data:image/jpeg;base64")
+                    if ":" in header and ";" in header:
+                        mime_type = header.split(":")[1].split(";")[0]
+                    else:
+                        mime_type = "image/jpeg"  # Default
+                else:
+                    # No header, assume raw base64
+                    base64_data = request.image_data
+                    mime_type = "image/jpeg"
+
+                # Decode and create image part
+                image_bytes = base64.b64decode(base64_data)
+                image_part = Part.from_data(
+                    mime_type=mime_type,
+                    data=image_bytes
+                )
+                prompt_parts.append(image_part)
+
+            except Exception as e:
+                print(f"Error processing image data: {e}")
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid image data: {str(e)}"
+                )
+
+        # Generate content (text-only or multimodal)
+        response = model.generate_content(prompt_parts)
 
         return ChatResponse(agent_response=response.text)
 
+    except HTTPException:
+        # Re-raise HTTP exceptions
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Generation failed: {str(e)}")
+
+
+@app.options("/chat/multimodal")
+async def multimodal_options():
+    """Handle CORS preflight for multimodal endpoint."""
+    from fastapi.responses import Response
+    return Response(
+        status_code=200,
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "POST, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type",
+        }
+    )
 
 
 @app.post("/chat/multimodal", response_model=ChatResponse)
@@ -178,6 +292,7 @@ async def multimodal_chat_handler(
     user_prompt: str = Form(...),
     brand_context: str = Form(...),
     audience_summary: str = Form(...),
+    history: Optional[str] = Form(None),  # JSON string of chat history
     image: Optional[UploadFile] = File(None),
     video: Optional[UploadFile] = File(None)
 ):
@@ -191,6 +306,7 @@ async def multimodal_chat_handler(
         user_prompt: The user's question or statement
         brand_context: Context about the brand
         audience_summary: Description of the persona
+        history: Optional JSON string of conversation history
         image: Optional image file
         video: Optional video file
 
@@ -207,8 +323,25 @@ async def multimodal_chat_handler(
         )
 
     try:
-        # Construct the text prompt
-        prompt_text = construct_prompt(user_prompt, brand_context, audience_summary)
+        # Parse history if provided
+        history_list = None
+        if history:
+            import json
+            try:
+                history_data = json.loads(history)
+                # Convert to ChatMessage objects
+                history_list = [ChatMessage(**msg) for msg in history_data]
+            except Exception as e:
+                print(f"Error parsing history: {e}")
+                # Continue without history if parsing fails
+
+        # Construct the text prompt with history support
+        prompt_text = construct_prompt_with_history(
+            user_prompt,
+            brand_context,
+            audience_summary,
+            history_list
+        )
 
         # Build the content list for Gemini
         content_parts = [prompt_text]
