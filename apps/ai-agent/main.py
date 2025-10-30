@@ -12,10 +12,13 @@ from datetime import timedelta, datetime
 from typing import Optional, List
 from fastapi import FastAPI, File, Form, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 from pydantic import BaseModel
 import vertexai
 from vertexai.generative_models import GenerativeModel, Part
 from google.cloud import storage
+from google.cloud import speech
+from google.cloud import texttospeech
 from google.auth import impersonated_credentials
 from google.auth.transport import requests as auth_requests
 import google.auth
@@ -488,6 +491,183 @@ async def multimodal_chat_handler(
         raise HTTPException(
             status_code=500,
             detail=f"Multimodal generation failed: {str(e)}"
+        )
+
+
+@app.options("/speech-to-text")
+async def speech_to_text_options():
+    """Handle CORS preflight for speech-to-text endpoint."""
+    return Response(
+        status_code=200,
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "POST, OPTIONS",
+            "Access-Control-Allow-Headers": "*",
+        }
+    )
+
+
+@app.post("/speech-to-text")
+async def speech_to_text_handler(audio: UploadFile = File(...)):
+    """
+    Converts audio input to text using Google Cloud Speech-to-Text.
+
+    Args:
+        audio: Audio file (WAV, MP3, WEBM, etc.)
+
+    Returns:
+        JSON with transcribed text
+
+    Raises:
+        HTTPException: If transcription fails
+    """
+    if not PROJECT_ID:
+        raise HTTPException(
+            status_code=500,
+            detail="Model not configured. Set GCLOUD_PROJECT environment variable."
+        )
+
+    try:
+        # Read audio file
+        audio_content = await audio.read()
+
+        # Initialize Speech-to-Text client
+        speech_client = speech.SpeechClient()
+
+        # Configure recognition
+        audio_config = speech.RecognitionAudio(content=audio_content)
+
+        # Detect audio encoding from content type
+        content_type = audio.content_type or "audio/webm"
+
+        if "webm" in content_type or "opus" in content_type:
+            encoding = speech.RecognitionConfig.AudioEncoding.WEBM_OPUS
+        elif "mp3" in content_type:
+            encoding = speech.RecognitionConfig.AudioEncoding.MP3
+        elif "wav" in content_type:
+            encoding = speech.RecognitionConfig.AudioEncoding.LINEAR16
+        else:
+            encoding = speech.RecognitionConfig.AudioEncoding.WEBM_OPUS  # Default
+
+        config = speech.RecognitionConfig(
+            encoding=encoding,
+            language_code="en-US",
+            enable_automatic_punctuation=True,
+        )
+
+        # Perform transcription
+        response = speech_client.recognize(config=config, audio=audio_config)
+
+        # Extract transcript
+        transcript = ""
+        for result in response.results:
+            transcript += result.alternatives[0].transcript
+
+        if not transcript:
+            raise HTTPException(
+                status_code=400,
+                detail="No speech detected in audio"
+            )
+
+        return {"transcript": transcript}
+
+    except Exception as e:
+        print(f"Speech-to-Text error: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Speech-to-Text failed: {str(e)}"
+        )
+
+
+@app.options("/text-to-speech")
+async def text_to_speech_options():
+    """Handle CORS preflight for text-to-speech endpoint."""
+    return Response(
+        status_code=200,
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "POST, OPTIONS",
+            "Access-Control-Allow-Headers": "*",
+        }
+    )
+
+
+@app.post("/text-to-speech")
+async def text_to_speech_handler(
+    text: str = Form(...),
+    voice_id: str = Form("en-US-Neural2-F")
+):
+    """
+    Converts text to speech using Google Cloud Text-to-Speech.
+
+    Args:
+        text: The text to convert to speech
+        voice_id: The Google Cloud TTS voice ID (e.g., en-US-Neural2-F or en-US-Neural2-D)
+
+    Returns:
+        Audio file (MP3) as binary response
+
+    Raises:
+        HTTPException: If synthesis fails
+    """
+    if not PROJECT_ID:
+        raise HTTPException(
+            status_code=500,
+            detail="Model not configured. Set GCLOUD_PROJECT environment variable."
+        )
+
+    try:
+        # Initialize Text-to-Speech client
+        tts_client = texttospeech.TextToSpeechClient()
+
+        # Set the text input
+        synthesis_input = texttospeech.SynthesisInput(text=text)
+
+        # Parse voice_id to extract language code and name
+        # Format: en-US-Neural2-F
+        parts = voice_id.split("-")
+        if len(parts) >= 4:
+            language_code = f"{parts[0]}-{parts[1]}"  # en-US
+            voice_name = voice_id  # Full voice ID
+        else:
+            # Fallback to default
+            language_code = "en-US"
+            voice_name = "en-US-Neural2-F"
+
+        # Build voice parameters
+        voice = texttospeech.VoiceSelectionParams(
+            language_code=language_code,
+            name=voice_name
+        )
+
+        # Select audio format
+        audio_config = texttospeech.AudioConfig(
+            audio_encoding=texttospeech.AudioEncoding.MP3,
+            speaking_rate=1.0,
+            pitch=0.0
+        )
+
+        # Perform text-to-speech synthesis
+        response = tts_client.synthesize_speech(
+            input=synthesis_input,
+            voice=voice,
+            audio_config=audio_config
+        )
+
+        # Return audio as binary response
+        return Response(
+            content=response.audio_content,
+            media_type="audio/mpeg",
+            headers={
+                "Content-Disposition": "attachment; filename=speech.mp3"
+            }
+        )
+
+    except Exception as e:
+        print(f"Text-to-Speech error: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Text-to-Speech failed: {str(e)}"
         )
 
 
