@@ -541,21 +541,31 @@ async def speech_to_text_handler(audio: UploadFile = File(...)):
         content_type = audio.content_type or ""
         filename = audio.filename or ""
 
+        # Set encoding and sample rate based on audio format
+        sample_rate = None
         if "webm" in content_type or "opus" in content_type:
             encoding = speech.RecognitionConfig.AudioEncoding.WEBM_OPUS
+            sample_rate = 48000  # Browser MediaRecorder default for WebM/Opus
         elif "mp3" in content_type or "mpeg" in content_type or filename.endswith(".mp3"):
             encoding = speech.RecognitionConfig.AudioEncoding.MP3
+            # MP3 sample rate varies, let API auto-detect
         elif "wav" in content_type or filename.endswith(".wav"):
             encoding = speech.RecognitionConfig.AudioEncoding.LINEAR16
+            # WAV sample rate varies, let API auto-detect
         else:
             # Let the API auto-detect the encoding
             encoding = speech.RecognitionConfig.AudioEncoding.ENCODING_UNSPECIFIED
 
-        config = speech.RecognitionConfig(
-            encoding=encoding,
-            language_code="en-US",
-            enable_automatic_punctuation=True,
-        )
+        # Build config with optional sample rate
+        config_params = {
+            "encoding": encoding,
+            "language_code": "en-US",
+            "enable_automatic_punctuation": True,
+        }
+        if sample_rate:
+            config_params["sample_rate_hertz"] = sample_rate
+
+        config = speech.RecognitionConfig(**config_params)
 
         # Perform transcription
         response = speech_client.recognize(config=config, audio=audio_config)
