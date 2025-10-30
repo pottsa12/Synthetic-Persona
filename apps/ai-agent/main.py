@@ -537,17 +537,19 @@ async def speech_to_text_handler(audio: UploadFile = File(...)):
         # Configure recognition
         audio_config = speech.RecognitionAudio(content=audio_content)
 
-        # Detect audio encoding from content type
-        content_type = audio.content_type or "audio/webm"
+        # Detect audio encoding from content type or filename
+        content_type = audio.content_type or ""
+        filename = audio.filename or ""
 
         if "webm" in content_type or "opus" in content_type:
             encoding = speech.RecognitionConfig.AudioEncoding.WEBM_OPUS
-        elif "mp3" in content_type:
+        elif "mp3" in content_type or "mpeg" in content_type or filename.endswith(".mp3"):
             encoding = speech.RecognitionConfig.AudioEncoding.MP3
-        elif "wav" in content_type:
+        elif "wav" in content_type or filename.endswith(".wav"):
             encoding = speech.RecognitionConfig.AudioEncoding.LINEAR16
         else:
-            encoding = speech.RecognitionConfig.AudioEncoding.WEBM_OPUS  # Default
+            # Let the API auto-detect the encoding
+            encoding = speech.RecognitionConfig.AudioEncoding.ENCODING_UNSPECIFIED
 
         config = speech.RecognitionConfig(
             encoding=encoding,
