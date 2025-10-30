@@ -16,7 +16,7 @@ from pydantic import BaseModel
 import vertexai
 from vertexai.generative_models import GenerativeModel, Part
 from google.cloud import storage
-from google.auth import compute_engine, iam
+from google.auth import impersonated_credentials
 from google.auth.transport import requests as auth_requests
 import google.auth
 from dotenv import load_dotenv
@@ -250,20 +250,19 @@ async def generate_upload_url(request: SignedUrlRequest):
         HTTPException: If URL generation fails
     """
     try:
-        # Get the default credentials and create an IAM signer
-        credentials, project = google.auth.default()
+        # Get the default credentials
+        source_credentials, project = google.auth.default()
 
         # Get service account email
         service_account_email = f"{os.getenv('GCLOUD_PROJECT_NUMBER', '179579890817')}-compute@developer.gserviceaccount.com"
 
-        # Create IAM request object for signing
-        auth_request = auth_requests.Request()
-
-        # Create IAM signer for signing the URL
-        signing_credentials = iam.Signer(
-            request=auth_request,
-            credentials=credentials,
-            service_account_email=service_account_email
+        # Create impersonated credentials that can sign
+        # This uses the IAM SignBlob API under the hood
+        signing_credentials = impersonated_credentials.Credentials(
+            source_credentials=source_credentials,
+            target_principal=service_account_email,
+            target_scopes=["https://www.googleapis.com/auth/devstorage.read_write"],
+            lifetime=900  # 15 minutes
         )
 
         # Initialize GCS client with default credentials
@@ -275,8 +274,7 @@ async def generate_upload_url(request: SignedUrlRequest):
         blob_name = f"{uuid.uuid4()}.{file_extension}"
         blob = bucket.blob(blob_name)
 
-        # Generate signed URL using IAM-based signing (valid for 15 minutes)
-        # Pass signing_credentials directly to generate_signed_url
+        # Generate signed URL using impersonated credentials (valid for 15 minutes)
         upload_url = blob.generate_signed_url(
             version="v4",
             expiration=timedelta(minutes=15),
