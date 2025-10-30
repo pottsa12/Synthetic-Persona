@@ -8,7 +8,7 @@ Supports text, images, and video inputs for rich brand feedback.
 import os
 import base64
 import uuid
-from datetime import timedelta
+from datetime import timedelta, datetime
 from typing import Optional, List
 from fastapi import FastAPI, File, Form, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -16,8 +16,9 @@ from pydantic import BaseModel
 import vertexai
 from vertexai.generative_models import GenerativeModel, Part
 from google.cloud import storage
-from google.auth import compute_engine
+from google.auth import compute_engine, iam
 from google.auth.transport import requests as auth_requests
+import google.auth
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -249,8 +250,27 @@ async def generate_upload_url(request: SignedUrlRequest):
         HTTPException: If URL generation fails
     """
     try:
-        # Initialize GCS client
-        storage_client = storage.Client(project=PROJECT_ID)
+        # Get the default credentials and create an IAM signer
+        credentials, project = google.auth.default()
+
+        # Get service account email
+        service_account_email = f"{os.getenv('GCLOUD_PROJECT_NUMBER', '179579890817')}-compute@developer.gserviceaccount.com"
+
+        # Create IAM request object for signing
+        auth_request = auth_requests.Request()
+
+        # Create IAM signer
+        signing_credentials = iam.Signer(
+            request=auth_request,
+            credentials=credentials,
+            service_account_email=service_account_email
+        )
+
+        # Initialize GCS client with signing credentials
+        storage_client = storage.Client(
+            project=PROJECT_ID,
+            credentials=signing_credentials
+        )
         bucket = storage_client.bucket("synthetic-personas-videos")
 
         # Generate unique blob name using UUID
@@ -258,18 +278,12 @@ async def generate_upload_url(request: SignedUrlRequest):
         blob_name = f"{uuid.uuid4()}.{file_extension}"
         blob = bucket.blob(blob_name)
 
-        # Get service account email for IAM-based signing
-        # Cloud Run default service account
-        service_account_email = f"{os.getenv('GCLOUD_PROJECT_NUMBER', '179579890817')}-compute@developer.gserviceaccount.com"
-
         # Generate signed URL using IAM-based signing (valid for 15 minutes)
-        # This works with Cloud Run's default credentials without requiring a private key
         upload_url = blob.generate_signed_url(
             version="v4",
             expiration=timedelta(minutes=15),
             method="PUT",
-            content_type=request.content_type,
-            service_account_email=service_account_email
+            content_type=request.content_type
         )
 
         # Construct GCS URI for Gemini
