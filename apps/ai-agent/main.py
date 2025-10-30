@@ -259,18 +259,15 @@ async def generate_upload_url(request: SignedUrlRequest):
         # Create IAM request object for signing
         auth_request = auth_requests.Request()
 
-        # Create IAM signer
+        # Create IAM signer for signing the URL
         signing_credentials = iam.Signer(
             request=auth_request,
             credentials=credentials,
             service_account_email=service_account_email
         )
 
-        # Initialize GCS client with signing credentials
-        storage_client = storage.Client(
-            project=PROJECT_ID,
-            credentials=signing_credentials
-        )
+        # Initialize GCS client with default credentials
+        storage_client = storage.Client(project=PROJECT_ID)
         bucket = storage_client.bucket("synthetic-personas-videos")
 
         # Generate unique blob name using UUID
@@ -279,11 +276,13 @@ async def generate_upload_url(request: SignedUrlRequest):
         blob = bucket.blob(blob_name)
 
         # Generate signed URL using IAM-based signing (valid for 15 minutes)
+        # Pass signing_credentials directly to generate_signed_url
         upload_url = blob.generate_signed_url(
             version="v4",
             expiration=timedelta(minutes=15),
             method="PUT",
-            content_type=request.content_type
+            content_type=request.content_type,
+            credentials=signing_credentials
         )
 
         # Construct GCS URI for Gemini
