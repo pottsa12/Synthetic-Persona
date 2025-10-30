@@ -16,6 +16,8 @@ from pydantic import BaseModel
 import vertexai
 from vertexai.generative_models import GenerativeModel, Part
 from google.cloud import storage
+from google.auth import compute_engine
+from google.auth.transport import requests as auth_requests
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -234,6 +236,9 @@ async def generate_upload_url(request: SignedUrlRequest):
     that allows the frontend to upload files directly to Google Cloud Storage.
     The signed URL is valid for 15 minutes.
 
+    Uses IAM-based signing which works with Cloud Run's default credentials
+    without requiring a service account key file.
+
     Args:
         request: SignedUrlRequest with filename and content type
 
@@ -253,12 +258,18 @@ async def generate_upload_url(request: SignedUrlRequest):
         blob_name = f"{uuid.uuid4()}.{file_extension}"
         blob = bucket.blob(blob_name)
 
-        # Generate signed URL (valid for 15 minutes)
+        # Get service account email for IAM-based signing
+        # Cloud Run default service account
+        service_account_email = f"{os.getenv('GCLOUD_PROJECT_NUMBER', '179579890817')}-compute@developer.gserviceaccount.com"
+
+        # Generate signed URL using IAM-based signing (valid for 15 minutes)
+        # This works with Cloud Run's default credentials without requiring a private key
         upload_url = blob.generate_signed_url(
             version="v4",
             expiration=timedelta(minutes=15),
             method="PUT",
-            content_type=request.content_type
+            content_type=request.content_type,
+            service_account_email=service_account_email
         )
 
         # Construct GCS URI for Gemini
